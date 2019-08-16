@@ -23,18 +23,20 @@ import (
 
 	"fmt"
 
+	"context"
+
 	"github.com/paypal/dce-go/config"
 	"github.com/paypal/dce-go/types"
 	utils "github.com/paypal/dce-go/utils/file"
 	"github.com/paypal/dce-go/utils/pod"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/context"
 )
 
 const (
 	PORT_DELIMITER = ":"
 	PATH_DELIMITER = "/"
 	NETWORK_PROXY  = "networkproxy"
+	ENVIRONMENT    = "environment"
 )
 
 func EditComposeFile(ctx *context.Context, file string, executorId string, taskId string, ports *list.Element) (string, *list.Element, error) {
@@ -42,13 +44,22 @@ func EditComposeFile(ctx *context.Context, file string, executorId string, taskI
 
 	filesMap := (*ctx).Value(types.SERVICE_DETAIL).(types.ServiceDetail)
 	if filesMap[file][types.SERVICES] == nil {
+		log.Printf("Services is empty for file %s \n", file)
 		return "", ports, nil
 	}
 
-	servMap := filesMap[file][types.SERVICES].(map[interface{}]interface{})
+	servMap, ok := filesMap[file][types.SERVICES].(map[interface{}]interface{})
+	if !ok {
+		log.Printf("Failed converting services to map[interface{}]interface{}")
+		return "", ports, nil
+	}
 
 	for serviceName := range servMap {
 		ports, err = UpdateServiceSessions(serviceName.(string), file, executorId, taskId, &filesMap, ports)
+		if err != nil {
+			log.Printf("Failed updating services: %v \n", err)
+			return file, ports, err
+		}
 	}
 
 	filesMap[file][types.VERSION] = "2.1"
@@ -62,7 +73,10 @@ func EditComposeFile(ctx *context.Context, file string, executorId string, taskI
 }
 
 func UpdateServiceSessions(serviceName, file, executorId, taskId string, filesMap *types.ServiceDetail, ports *list.Element) (*list.Element, error) {
-	containerDetails := (*filesMap)[file][types.SERVICES].(map[interface{}]interface{})[serviceName].(map[interface{}]interface{})
+	containerDetails, ok := (*filesMap)[file][types.SERVICES].(map[interface{}]interface{})[serviceName].(map[interface{}]interface{})
+	if !ok {
+		log.Println("POD_UPDATE_YAML_FAIL")
+	}
 	logger := log.WithFields(log.Fields{
 		"serviceName": serviceName,
 		"taskId":      taskId,
@@ -72,6 +86,29 @@ func UpdateServiceSessions(serviceName, file, executorId, taskId string, filesMa
 	if _, ok := containerDetails[types.RESTART].(string); ok {
 		delete(containerDetails, types.RESTART)
 		log.Println("Edit Compose File : Remove restart")
+	}
+
+	// Get env list
+	var envIsArray bool
+	envMap, ok := containerDetails[ENVIRONMENT].(map[interface{}]interface{})
+	if ok {
+		logger.Printf("ENV is an array %v of %s : %v", envIsArray, serviceName, envMap)
+	}
+	envList, ok := containerDetails[ENVIRONMENT].([]interface{})
+	if ok {
+		logger.Printf("ENV is an array %v of %s : %v", envIsArray, serviceName, envList)
+		envIsArray = true
+	}
+	if envMap == nil && envList == nil {
+		envMap = make(map[interface{}]interface{})
+	}
+
+	if envIsArray {
+		envList = append(envList, fmt.Sprintf("%s=%d", "PYTHONUNBUFFERED", 1))
+		containerDetails[ENVIRONMENT] = envList
+	} else {
+		envMap["PYTHONUNBUFFERED"] = 1
+		containerDetails[ENVIRONMENT] = envMap
 	}
 
 	// Update session of network_mode
